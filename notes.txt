@@ -8,6 +8,7 @@ you will see something like :(venv) C:\Users\USER\Web development\Meme Hand Trac
 
 Install reqirements.txt
 run: pip install -r requirements.txt
+datasets: https://www.kaggle.com/datasets/lynnangelaclawagon/meme-hand-tracker/data
 
 Run the application:
 python app.py
