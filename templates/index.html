@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meme Hand Tracker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 id="meme-name">NORMAL</h1>
+            <div class="controls">
+                <button id="camera-btn">Toggle Camera</button>
+            </div>
+        </div>
+        
+        <div class="display-grid">
+            <div class="card">
+                <div class="label">CAMERA</div>
+                <img id="camera-feed" src="{{ url_for('video_feed') }}" alt="Camera">
+            </div>
+            <div class="card">
+                <div class="label">MEME</div>
+                <img id="meme-image" src="/static/img/monekey/normal.png" alt="Meme">
+            </div>
+        </div>
+        
+        <div class="status-bar">
+            <span id="hands-status">Hands: 0/2</span>
+        </div>
+    </div>
+
+    <script>
+        async function update() {
+            try {
+                const res = await fetch('/stats');
+                const data = await res.json();
+                
+                document.getElementById('meme-name').textContent = data.meme.toUpperCase();
+                document.getElementById('meme-image').src = data.meme_path + '?t=' + Date.now();
+                document.getElementById('hands-status').textContent = `Hands: ${data.hands}/2`;
+                
+                
+            } catch(e) {
+                console.error("Update error:", e);
+            }
+        }
+
+        document.getElementById('camera-btn').onclick = async () => {
+            const res = await fetch('/toggle_camera');
+            const data = await res.json();
+            const feed = document.getElementById('camera-feed');
+            if (!data.enabled) {
+                feed.src = "";
+                feed.alt = " ";
+            } else {
+                feed.src = "{{ url_for('video_feed') }}";
+                feed.alt = "Camera";
+            }
+        };
+
+        setInterval(update, 200);
+    </script>
+</body>
+</html>
