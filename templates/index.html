@@ -18,13 +18,16 @@
         <div class="display-grid">
             <div class="card">
                 <div class="label">CAMERA</div>
-                <img id="camera-feed" src="{{ url_for('video_feed') }}" alt="Camera">
+                <video id="camera-feed" autoplay playsinline muted></video>
+                <canvas id="tracker-overlay"></canvas>
             </div>
             <div class="card">
                 <div class="label">MEME</div>
-                <img id="meme-image" src="/static/img/monekey/normal.png" alt="Meme">
+                <img id="meme-image" src="{{ initial_meme_path }}" alt="Meme">
             </div>
         </div>
+
+        <canvas id="capture-canvas" width="640" height="360" hidden></canvas>
         
         <div class="status-bar">
             <span id="hands-status">Hands: 0/2</span>
@@ -32,35 +35,268 @@
     </div>
 
     <script>
-        async function update() {
-            try {
-                const res = await fetch('/stats');
-                const data = await res.json();
-                
-                document.getElementById('meme-name').textContent = data.meme.toUpperCase();
-                document.getElementById('meme-image').src = data.meme_path + '?t=' + Date.now();
-                document.getElementById('hands-status').textContent = `Hands: ${data.hands}/2`;
-                
-                
-            } catch(e) {
-                console.error("Update error:", e);
+        const memeName = document.getElementById('meme-name');
+        const memeImage = document.getElementById('meme-image');
+        const handsStatus = document.getElementById('hands-status');
+        const cameraBtn = document.getElementById('camera-btn');
+        const cameraFeed = document.getElementById('camera-feed');
+        const trackerOverlay = document.getElementById('tracker-overlay');
+        const trackerCtx = trackerOverlay.getContext('2d');
+        const captureCanvas = document.getElementById('capture-canvas');
+        const captureCtx = captureCanvas.getContext('2d');
+
+        let stream = null;
+        let frameTimer = null;
+        let statsTimer = null;
+        let cameraEnabled = true;
+        let frameInFlight = false;
+
+        function resizeTrackerOverlay() {
+            const rect = cameraFeed.getBoundingClientRect();
+            const width = Math.max(1, Math.round(rect.width));
+            const height = Math.max(1, Math.round(rect.height));
+
+            if (trackerOverlay.width !== width || trackerOverlay.height !== height) {
+                trackerOverlay.width = width;
+                trackerOverlay.height = height;
             }
         }
 
-        document.getElementById('camera-btn').onclick = async () => {
-            const res = await fetch('/toggle_camera');
-            const data = await res.json();
-            const feed = document.getElementById('camera-feed');
-            if (!data.enabled) {
-                feed.src = "";
-                feed.alt = " ";
-            } else {
-                feed.src = "{{ url_for('video_feed') }}";
-                feed.alt = "Camera";
+        function clearTrackers() {
+            resizeTrackerOverlay();
+            trackerCtx.clearRect(0, 0, trackerOverlay.width, trackerOverlay.height);
+        }
+
+        function drawTrackers(landmarks, connections) {
+            clearTrackers();
+
+            if (!Array.isArray(landmarks) || landmarks.length === 0) {
+                return;
+            }
+
+            const width = trackerOverlay.width;
+            const height = trackerOverlay.height;
+
+            trackerCtx.lineWidth = 2;
+            trackerCtx.strokeStyle = '#3b82f6';
+            trackerCtx.fillStyle = '#f8fafc';
+
+            for (const hand of landmarks) {
+                if (!Array.isArray(hand)) {
+                    continue;
+                }
+
+                if (Array.isArray(connections)) {
+                    for (const pair of connections) {
+                        if (!Array.isArray(pair) || pair.length !== 2) {
+                            continue;
+                        }
+
+                        const from = hand[pair[0]];
+                        const to = hand[pair[1]];
+
+                        if (!from || !to) {
+                            continue;
+                        }
+
+                        trackerCtx.beginPath();
+                        trackerCtx.moveTo(from[0] * width, from[1] * height);
+                        trackerCtx.lineTo(to[0] * width, to[1] * height);
+                        trackerCtx.stroke();
+                    }
+                }
+
+                for (const point of hand) {
+                    if (!Array.isArray(point) || point.length < 2) {
+                        continue;
+                    }
+
+                    trackerCtx.beginPath();
+                    trackerCtx.arc(point[0] * width, point[1] * height, 3, 0, Math.PI * 2);
+                    trackerCtx.fill();
+                }
+            }
+        }
+
+        function applyStats(data) {
+            if (!data) {
+                return;
+            }
+            memeName.textContent = (data.meme || 'normal').toUpperCase();
+            if (data.meme_path) {
+                memeImage.src = data.meme_path + '?t=' + Date.now();
+            }
+            handsStatus.textContent = `Hands: ${data.hands || 0}/2`;
+
+            if (Array.isArray(data.landmarks)) {
+                drawTrackers(data.landmarks, data.connections || []);
+            }
+        }
+
+        function updateButtonLabel() {
+            cameraBtn.textContent = cameraEnabled ? 'Disable Camera' : 'Enable Camera';
+        }
+
+        async function refreshStats() {
+            try {
+                const res = await fetch('/stats');
+                if (!res.ok) {
+                    return;
+                }
+                const data = await res.json();
+                applyStats(data);
+            } catch (e) {
+                console.error('Stats error:', e);
+            }
+        }
+
+        async function startCamera() {
+            if (stream) {
+                return true;
+            }
+
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'user',
+                        width: { ideal: 640 },
+                        height: { ideal: 360 }
+                    },
+                    audio: false
+                });
+                cameraFeed.srcObject = stream;
+                await cameraFeed.play();
+                resizeTrackerOverlay();
+                return true;
+            } catch (e) {
+                console.error('Camera start error:', e);
+                handsStatus.textContent = 'Hands: 0/2';
+                clearTrackers();
+                return false;
+            }
+        }
+
+        function stopCamera() {
+            if (!stream) {
+                return;
+            }
+            stream.getTracks().forEach(track => track.stop());
+            stream = null;
+            cameraFeed.srcObject = null;
+            clearTrackers();
+        }
+
+        async function sendFrame() {
+            if (!cameraEnabled || !stream || frameInFlight) {
+                return;
+            }
+            if (cameraFeed.readyState < 2) {
+                return;
+            }
+
+            frameInFlight = true;
+
+            try {
+                captureCtx.drawImage(cameraFeed, 0, 0, captureCanvas.width, captureCanvas.height);
+                const image = captureCanvas.toDataURL('image/jpeg', 0.75);
+
+                const res = await fetch('/analyze_frame', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ image })
+                });
+
+                if (!res.ok) {
+                    return;
+                }
+
+                const data = await res.json();
+                applyStats(data);
+            } catch (e) {
+                console.error('Frame send error:', e);
+                clearTrackers();
+            } finally {
+                frameInFlight = false;
+            }
+        }
+
+        function startLoops() {
+            if (!frameTimer) {
+                frameTimer = setInterval(sendFrame, 220);
+            }
+            if (!statsTimer) {
+                statsTimer = setInterval(refreshStats, 500);
+            }
+        }
+
+        function stopLoops() {
+            if (frameTimer) {
+                clearInterval(frameTimer);
+                frameTimer = null;
+            }
+            if (statsTimer) {
+                clearInterval(statsTimer);
+                statsTimer = null;
+            }
+        }
+
+        cameraBtn.onclick = async () => {
+            try {
+                const res = await fetch('/toggle_camera');
+                if (!res.ok) {
+                    return;
+                }
+
+                const data = await res.json();
+                cameraEnabled = !!data.enabled;
+
+                if (!cameraEnabled) {
+                    stopLoops();
+                    stopCamera();
+                    await refreshStats();
+                    updateButtonLabel();
+                    clearTrackers();
+                    return;
+                }
+
+                const ok = await startCamera();
+                if (!ok) {
+                    await fetch('/toggle_camera');
+                    cameraEnabled = false;
+                    updateButtonLabel();
+                    clearTrackers();
+                    return;
+                }
+
+                startLoops();
+                updateButtonLabel();
+            } catch (e) {
+                console.error('Toggle camera error:', e);
             }
         };
 
-        setInterval(update, 200);
+        (async () => {
+            const ok = await startCamera();
+            if (!ok) {
+                try {
+                    await fetch('/toggle_camera');
+                } catch (_) {}
+                cameraEnabled = false;
+            }
+
+            resizeTrackerOverlay();
+
+            updateButtonLabel();
+            await refreshStats();
+
+            if (cameraEnabled) {
+                startLoops();
+            }
+        })();
+
+        window.addEventListener('resize', resizeTrackerOverlay);
     </script>
 </body>
 </html>
